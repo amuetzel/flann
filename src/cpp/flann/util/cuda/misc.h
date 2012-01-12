@@ -86,6 +86,74 @@ warp_reduce_min ( volatile keyT* smem, volatile valueT* value )
         }
     }
 }
+
+
+//! sorts the 32 elements (key-value-pairs)  
+template< typename Key, typename Value, bool ascending >
+__device__ void 
+sort_warp( Key* key, Value *value )
+{
+  int i = threadIdx.x;
+  // Now we will merge sub-sequences of length 1,2,...,WG/2
+  for (int length=1;length<32;length<<=1)
+  {
+    int iData = value[i];
+    float iKey = key[i];
+    int ii = i & (length-1);  // index in our sequence in 0..length-1
+    int sibling = (i - ii) ^ length; // beginning of the sibling sequence
+    int pos = 0;
+    for (int inc=length;inc>0;inc>>=1) // increment for dichotomic search
+    {
+      int j = sibling+pos+inc-1;
+      float jKey = key[j];
+      bool smaller = ( ascending? jKey < iKey : jKey > iKey) || ( jKey == iKey && j < i );
+      pos += (smaller)?inc:0;
+      pos = min(pos,length);
+    }
+    int bits = 2*length-1; // mask for destination
+    int dest = ((ii + pos) & bits) | (i & ~bits); // destination index in merged sequence
+    //__syncthreads();
+    key[dest] = iKey;
+    value[dest] = iData;
+    //__syncthreads();
+  }
+}
+
+
+//! merges the two shared memory blocks so that key_dest will contain the minimum elements 
+//! and key_src will contain the maximum elements
+template< typename Key, typename Value >
+__device__ void 
+merge_block( Key* key_dest, Value *value_dest, Key* key_src, Value* value_src )
+{
+  int i = threadIdx.x;
+
+  
+  __shared__ bool changed;
+  changed=false;
+  __syncthreads();
+  //sort_warp<float,int,true>(key_dest, value_dest);  
+  if( key_dest[i] > key_src[i] )
+  {
+      float tmp = key_dest[i];
+      key_dest[i]=key_src[i];
+      key_src[i]=tmp;
+      int tmpu = value_dest[i];
+      value_dest[i]=value_src[i];
+      value_src[i]=tmpu;
+      changed=true;
+  }
+  __syncthreads();
+  if( changed )
+  {
+      sort_warp<float,int,false>(key_src, value_src);
+      sort_warp<float,int,true>(key_dest, value_dest);  
+  }
+  //sort_warp<float,int,false>(key_src, value_src);
+}
+
+
+
 }
 }
 #endif

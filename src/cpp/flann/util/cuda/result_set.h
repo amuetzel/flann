@@ -30,6 +30,7 @@
 #define FLANN_UTIL_CUDA_RESULTSET_H
 
 #include <flann/util/cuda/heap.h>
+#include <flann/util/cuda/misc.h>
 #include <limits>
 
 __device__ __forceinline__
@@ -52,7 +53,7 @@ struct SingleResultSet
 {
     int bestIndex;
     DistanceType bestDist;
-    const DistanceType epsError;
+    DistanceType epsError;
 
     __device__
     SingleResultSet( DistanceType eps ) : bestIndex(-1),bestDist(INFINITY), epsError(eps){ }
@@ -98,6 +99,18 @@ struct SingleResultSet
         resultDist[0]=bestDist;
         resultIndex[0]=bestIndex;
     }
+    
+    __device__
+    inline void
+    mergeWarpElements( int elements[32], DistanceType distances[32], bool mergeIntoThisSet, SingleResultSet* /**/)
+    {
+        if ( threadIdx.x < 16 )
+            flann::cuda::warp_reduce_min<float,int,32> (distances, elements );
+        if (mergeIntoThisSet)
+            insert (elements[0],distances[0]);
+    }
+    __device__
+    SingleResultSet(){}
 };
 
 template< typename DistanceType >
@@ -121,16 +134,18 @@ struct GreaterThan
 template< typename DistanceType, bool useHeap >
 struct KnnResultSet
 {
-    int foundNeighbors;
+    
+    //int foundNeighbors;
     DistanceType largestHeapDist;
-    int maxDistIndex;
-    const int k;
-    const bool sorted;
-    const DistanceType epsError;
-
+    //int maxDistIndex;
+    int k;
+    //bool sorted;
+    DistanceType epsError;
 
     __device__
-    KnnResultSet(int knn, bool sortResults, DistanceType eps) : foundNeighbors(0),largestHeapDist(INFINITY),k(knn), sorted(sortResults), epsError(eps){ }
+    KnnResultSet(){}
+    __device__
+    KnnResultSet(int knn, bool sortResults, DistanceType eps) : /*foundNeighbors(0),*/largestHeapDist(INFINITY),k(knn),/*, sorted(sortResults),*/ epsError(eps){ }
 
     //          __host__ __device__
     //          KnnResultSet(const KnnResultSet& o):foundNeighbors(o.foundNeighbors),largestHeapDist(o.largestHeapDist),k(o.k){ }
@@ -139,13 +154,13 @@ struct KnnResultSet
     inline DistanceType
     worstDist()
     {
-        return largestHeapDist;
+        return largestHeapDist*epsError;
     }
 
     __device__
     inline void
     insert(int index, DistanceType dist)
-    {
+    {/*
         if( foundNeighbors<k ) {
             resultDist[foundNeighbors]=dist;
             resultIndex[foundNeighbors]=index;
@@ -174,20 +189,20 @@ struct KnnResultSet
                 findLargestDistIndex();
             }
 
-        }
+        }*/
     }
 
     __device__
     void
     findLargestDistIndex( )
-    {
+    {/*
         largestHeapDist=resultDist[0];
         maxDistIndex=0;
         for( int i=1; i<k; i++ )
             if( resultDist[i] > largestHeapDist ) {
                 maxDistIndex=i;
                 largestHeapDist=resultDist[i];
-            }
+            }**/
     }
 
     float* resultDist;
@@ -211,14 +226,94 @@ struct KnnResultSet
     inline void
     finish()
     {
-        if( sorted ) {
+        /*if( false && sorted ) {
             if( !useHeap ) flann::cuda::heap::make_heap(resultDist,resultIndex,k,GreaterThan<DistanceType>());
             for( int i=k-1; i>0; i-- ) {
                 flann::cuda::swap( resultDist[0], resultDist[i] );
                 flann::cuda::swap( resultIndex[0], resultIndex[i] );
                 flann::cuda::heap::sift_down( resultDist,resultIndex, 0, i, GreaterThan<DistanceType>() );
             }
+        }*/
+    }
+    
+
+    
+    
+    __device__
+    static inline void
+    mergeWarpElements( int elements[32], DistanceType distances[32], bool/**/, KnnResultSet* destination )
+    {
+        int i = threadIdx.x; // index in workgroup
+              
+        __shared__ DistanceType shared_dist[32];
+        __shared__ int shared_index[32];
+        
+        // early abort: don't do anything if no element needs to be inserted
+        if (!__any(distances[i]< destination->largestHeapDist) )
+            return;
+        
+        if (destination->k >=16)
+        {
+            sort_warp<float,int,false>(distances,elements);
+            for( int blockstart=0; blockstart< (destination->k);blockstart+=32 )
+                //int blockstart=0;
+            {
+                
+                
+                if( i+blockstart < destination->k )
+                {
+                    shared_dist[i]=destination->resultDist[blockstart+i];
+                    shared_index[i]=destination->resultIndex[blockstart+i];
+                }
+                else
+                {
+                    shared_dist[i]=infinity();
+                }
+                
+                merge_block(shared_dist, shared_index, distances, elements);
+                if( i+blockstart < destination->k )
+                {
+                    destination->resultDist[blockstart+i]=shared_dist[i];
+                    destination->resultIndex[blockstart+i]=shared_index[i];
+                }
+                
+                //key2[i]=s_key[i];
+                //value2[i]=s_val[i];
+            }
+            
+            //key2[i]=s_key[i];
+            //value2[i]=s_val[i];
+            
+            //if( i<8 )
+            //destination->resultDist[i]=123;
+            __syncthreads();
+            destination->largestHeapDist=destination->resultDist[destination->k-1];
         }
+        else // optimization for 2*k <= warp_size
+        {
+            if (i>=16)
+            {
+                if (distances[i] > distances[i-16])
+                {
+                    distances[i]=distances[i-16];
+                    elements[i]=elements[i-16];
+                    distances[i-16]=INFINITY;
+                }
+            }
+            if( i < destination->k )
+            {
+                distances[i]=destination->resultDist[i];
+                elements[i]=destination->resultIndex[i];
+            }
+            sort_warp<float,int,true>(distances,elements);
+            if( i < destination->k )
+            {
+                destination->resultDist[i] = distances[i];
+                destination->resultIndex[i] = elements[i];
+            }
+            destination->largestHeapDist=distances[destination->k-1];
+        }
+
     }
 };
 
@@ -529,6 +624,26 @@ struct RadiusResultSet
             }
         }
     }
+};
+
+template <typename ResultSet>
+struct ResultSetTraits
+{
+    static const bool has_warp_merge=false;
+};
+
+template< typename DistanceType>
+struct ResultSetTraits<SingleResultSet<DistanceType> >
+{
+    static const bool has_warp_merge=true;
+    static const bool should_merge_after_each_block=false;
+};
+
+template< typename DistanceType, bool use_heap>
+struct ResultSetTraits<KnnResultSet<DistanceType, use_heap> >
+{
+    static const bool has_warp_merge=true;
+    static const bool should_merge_after_each_block=true;
 };
 }
 }
