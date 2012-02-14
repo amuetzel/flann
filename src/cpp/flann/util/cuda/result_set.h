@@ -62,7 +62,7 @@ struct SingleResultSet
     inline float
     worstDist()
     {
-        return bestDist;
+        return bestDist/epsError;
     }
 
     __device__
@@ -154,7 +154,7 @@ struct KnnResultSet
     inline DistanceType
     worstDist()
     {
-        return largestHeapDist*epsError;
+        return largestHeapDist/epsError;
     }
 
     __device__
@@ -289,24 +289,26 @@ struct KnnResultSet
             __syncthreads();
             destination->largestHeapDist=destination->resultDist[destination->k-1];
         }
-        else // optimization for 2*k <= warp_size
+        else // optimization for 2*k <= warp_size: put all data into the temporary 32bit shared buffer, sort and we're done!
         {
-            if (i>=16)
+            
+            /*if (i>=16) // meh, doesn't work...
             {
-                if (distances[i] > distances[i-16])
+                if (distances[i] > distances[i-16]) // pre-select the smaller half of the input data set
                 {
                     distances[i]=distances[i-16];
                     elements[i]=elements[i-16];
-                    distances[i-16]=INFINITY;
+                    distances[i-16]=INFINITY; // make sure we don't get any duplicates
                 }
-            }
-            if( i < destination->k )
+            }*/
+            sort_warp<float,int,false>(distances,elements); 
+            if( i < destination->k ) // fetch original data
             {
                 distances[i]=destination->resultDist[i];
                 elements[i]=destination->resultIndex[i];
             }
-            sort_warp<float,int,true>(distances,elements);
-            if( i < destination->k )
+            sort_warp<float,int,true>(distances,elements); 
+            if( i < destination->k ) // copy results back
             {
                 destination->resultDist[i] = distances[i];
                 destination->resultIndex[i] = elements[i];
@@ -325,7 +327,7 @@ struct CountingRadiusResultSet
     int max_neighbors_;
 
     __device__
-    CountingRadiusResultSet(DistanceType radius, int max_neighbors) : count_(0),radius_sq_(radius), max_neighbors_(max_neighbors){ }
+    CountingRadiusResultSet(DistanceType radius=0, int max_neighbors=0) : count_(0),radius_sq_(radius), max_neighbors_(max_neighbors){ }
 
     __device__
     inline DistanceType
@@ -358,6 +360,18 @@ struct CountingRadiusResultSet
     {
         if(( max_neighbors_<=0) ||( count_<=max_neighbors_) ) resultIndex[0]=count_;
         else resultIndex[0]=max_neighbors_;
+    }
+    
+    __device__
+    inline void
+    mergeWarpElements( int elements[32], DistanceType distances[32], bool mergeIntoThisSet, CountingRadiusResultSet* destination)
+    {
+        elements[threadIdx.x]=distances[threadIdx.x]<radius_sq_?1:0;
+        warp_reduce_sum<int,32>(elements);
+        if(threadIdx.x==0)
+        {
+            destination->count_+=elements[0];
+        }
     }
 };
 
@@ -641,6 +655,13 @@ struct ResultSetTraits<SingleResultSet<DistanceType> >
 
 template< typename DistanceType, bool use_heap>
 struct ResultSetTraits<KnnResultSet<DistanceType, use_heap> >
+{
+    static const bool has_warp_merge=true;
+    static const bool should_merge_after_each_block=true;
+};
+
+template< typename DistanceType>
+struct ResultSetTraits<CountingRadiusResultSet<DistanceType> >
 {
     static const bool has_warp_merge=true;
     static const bool should_merge_after_each_block=true;

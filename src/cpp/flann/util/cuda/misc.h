@@ -87,15 +87,46 @@ warp_reduce_min ( volatile keyT* smem, volatile valueT* value )
     }
 }
 
+template <typename keyT, int size>
+__device__ __forceinline__ void 
+warp_reduce_sum ( volatile keyT* smem )
+{
+    if (size >=64 )
+    {
+        smem[threadIdx.x] += smem[threadIdx.x+32];
+    }
+    if (size >=32 )
+    {
+        smem[threadIdx.x] += smem[threadIdx.x+16];
+    }
+    if (size >=16 )
+    {
+        smem[threadIdx.x] += smem[threadIdx.x+8];
+    }
+    if (size >=8 )
+    {
+        smem[threadIdx.x] += smem[threadIdx.x+4];
+    }
+    if (size >=4 )
+    {
+        smem[threadIdx.x] += smem[threadIdx.x+2];
+    }
+    if (size >=2 )
+    {
+        smem[threadIdx.x] += smem[threadIdx.x+1];
+    }
+}
+
 
 //! sorts the 32 elements (key-value-pairs)  
+//! adapted from http://www.bealto.com/gpu-sorting_parallel-merge-local.html, thanks to Eric Bainville for the code!
 template< typename Key, typename Value, bool ascending >
 __device__ void 
-sort_warp( Key* key, Value *value )
+sort_warp( Key* key, Value *value, unsigned len = 32 )
 {
   int i = threadIdx.x;
   // Now we will merge sub-sequences of length 1,2,...,WG/2
-  for (int length=1;length<32;length<<=1)
+  for (int length=1;length<len;length<<=1)
   {
     int iData = value[i];
     float iKey = key[i];
