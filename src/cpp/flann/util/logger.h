@@ -85,6 +85,12 @@ public:
     static void setLevel(int level) { instance().logLevel = level; }
 
     /**
+     * Returns the currently set logging level.
+     * @return current logging level
+     */
+    static int getLevel() { return instance().logLevel; }
+
+    /**
      * Sets the logging destination
      * @param name Filename or NULL for console
      */
@@ -119,6 +125,7 @@ public:
     LOG_METHOD(error, FLANN_LOG_ERROR)
     LOG_METHOD(warn, FLANN_LOG_WARN)
     LOG_METHOD(info, FLANN_LOG_INFO)
+    LOG_METHOD(debug, FLANN_LOG_DEBUG)
 
 private:
     FILE* stream;
